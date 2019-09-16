@@ -1,0 +1,130 @@
+import config
+from snakemake.utils import R
+import os
+import sys
+
+
+#path to apps
+
+ccs = "/is2/projects/pacbio/static/software/smrtlinkv5/install/smrtlink-release_6.0.0.47841/bundles/smrttools/install/smrttools-release_6.0.0.47835/smrtcmds/bin/ccs"
+lima = "/is2/projects/pacbio/static/software/smrtlinkv5/install/smrtlink-release_6.0.0.47841/bundles/smrttools/install/smrttools-release_6.0.0.47835/smrtcmds/bin/lima"
+isoseq3 = "/is2/projects/pacbio/static/software/smrtlinkv5/install/smrtlink-release_6.0.0.47841/bundles/smrttools/install/smrttools-release_6.0.0.47835/smrtcmds/bin/isoseq3"
+sqanti = "/is2/projects/CCR-SF/active/Software/tools/sqanti/ConesaLab-sqanti-3d0cb4c23799/sqanti_qc.py"
+matchannot = "/users/n2001220166/skellytf/work/MatchAnnot/matchAnnot.py"
+cogent = ""
+cupcake = "/is2/projects/CCR-SF/active/Software/tools/cDNA_Cupcake"
+
+if config.reference == "hg38":
+    ref = "/is2/projects/CCR-SF/active/RefGenomes/hg38/BWA/hg38_genome_with_contigs.fa"
+    gmap = "/is2/projects/CCR-SF/active/RefGenomes/hg38/gmap/hg38_with_contigs/hg38_with_contigs"
+    gtf = "/is2/projects/CCR-SF/active/RefGenomes/hg38/GTF/gencode.v24.annotation.gtf"
+
+analysis = config.analysis
+subread = config.subread
+
+cn = ""
+st = 0
+targetsam = "polished.hq_corrected_sorted.sam" 
+targeted = config.targeted
+if targeted != "":
+    cn = targeted.split(":")[0]
+    st = int(targeted.split(":")[1].split("-")[0])
+    ed = int(targeted.split(":")[1].split("-")[1])
+    targetsam = "polished.hq_corrected_sorted_targeted.sam"
+	
+pythonimport = "export PATH=/is2/projects/CCR-SF/active/Software/tools/Anaconda/2.7/install/bin:$PATH; export PYTHONPATH=/is2/projects/CCR-SF/active/Software/tools/Anaconda/2.7/install/lib/python2.7/site-packages"
+
+
+rule all:
+    input: "ccs.bam", "demux.primer_5p--primer_3p.bam", "unpolished.bam", "polished.bam", "polished.hq.fasta", "classify_report.csv", "sqanti_report.pdf", "polished.hq_corrected.sam", "polished.hq_corrected_sorted.sam", targetsam, "final_isoforms.collapsed.group.txt", "final_isoforms.collapsed.read_stat.txt", "final_isoforms.collapsed.filtered.gff"#, "matchannot_out.txt"   
+
+rule ccs:
+    input: subread
+    output: "ccs.bam"
+    params: batch = "-l nodes=1:ppn=48"
+    shell: "{ccs} {input} {output} --noPolish --minPasses 1 --numThreads 48 2>ccs.err"
+
+rule lima:
+    input: bam = "ccs.bam"
+    output: "demux.primer_5p--primer_3p.bam", "demux.lima.clips"
+    params: batch = "-l nodes=1:ppn=24", prefix = "demux.bam"
+    shell: "{lima} --isoseq --dump-clips --no-pbi -j 24 {input.bam} primers.fasta {params.prefix} 2>lima.err"
+
+rule cluster:
+    input: "demux.primer_5p--primer_3p.bam"
+    output: "unpolished.bam"
+    params: batch = "-l nodes=1:ppn=48"
+    shell: "{isoseq3} cluster {input} {output} -j 48 2>cluster.err" #[--split-bam 24]
+
+rule polish:
+    input: "unpolished.bam"
+    output: bam = "polished.bam", hq = "polished.hq.fastq.gz"
+    params: batch = "-l nodes=1:ppn=24"
+    shell: "{isoseq3} polish {input} {subread} {output.bam} 2>polish.err"
+
+rule seqtk:
+    input: "polished.hq.fastq.gz"
+    output: "polished.hq.fasta", "polished.hq.fastq" 
+    params: batch = "-l nodes=1:ppn=8"
+    shell: "module load seqtk; seqtk seq -a {input} > {output}; gzip -d {input}"
+
+rule classify_report:
+    input: clips = "demux.lima.clips"
+    output: "classify_report.csv"
+    params: batch = "-l nodes=1:ppn=8"
+    shell: "{pythonimport}; python {cupcake}/post_isoseq_cluster/isoseq3_make_classify_report.py {input.clips} primers.fasta --flnc_bam unpolished.flnc.bam"
+
+rule cluster_report:
+    input: "polished.bam"
+    output: "cluster_report.csv"
+    params: batch = "-l nodes=1:ppn=8"
+    shell: "{pythonimport}; python {cupcake}/post_isoseq_cluster/isoseq3_make_cluster_report.py {input}"
+
+rule sqanti:
+    input: "polished.hq.fasta"
+    output: "sqanti_report.pdf", "polished.hq_corrected.sam"
+    params: batch = "-l nodes=1:ppn=8"
+    shell: "export PATH=/opt/nasapps/development/R/3.4.0/bin:$PATH;export R_LIBS=/is2/projects/CCR-SF/active/Software/tools/sqanti/ConesaLab-sqanti-3d0cb4c23799/R_packages;export PATH=/is2/projects/pacbio/static/software/smrtlinkv6/smrtcmds/bin:$PATH;export PATH=/is2/projects/CCR-SF/active/Software/tools/Anaconda/2.7/install/bin:$PATH;{sqanti} -x {gmap} -t 8 -o sqanti {input} {gtf} {ref}"
+
+rule sort:
+    input: "polished.hq_corrected.sam"
+    output: "polished.hq_corrected_sorted.sam"
+    params: batch = "-l nodes=1:ppn=8"
+    shell: "module load samtools; samtools sort {input} -o {output}"
+
+rule targeted:
+    input: "polished.hq_corrected_sorted.sam"
+    output: "polished.hq_corrected_sorted_targeted.sam"
+    params: batch = "-l nodes=1:ppn=1"    
+    run:
+        import pysam
+        samfile = pysam.AlignmentFile("polished.hq_corrected_sorted.sam", "r")
+        osamfile = pysam.AlignmentFile("polished.hq_corrected_sorted_targeted.sam", "w", template=samfile)
+
+        for read in samfile:
+            if read.reference_name == cn and read.reference_start > st and read.reference_start < ed:
+                osamfile.write(read)        
+
+rule collapse:
+    input: file1 = "polished.hq.fastq", file2 = targetsam
+    output: "final_isoforms.collapsed.group.txt", "final_isoforms.collapsed.gff"
+    params: batch = "-l nodes=1:ppn=8", prefix = "final_isoforms"
+    shell: "{pythonimport}; python {cupcake}/cupcake/tofu/collapse_isoforms_by_sam.py --input {input.file1} --fq -s {input.file2} --dun-merge-5-shorter -o {params.prefix} -c 0.6"
+
+rule count:
+    input: file1 = "final_isoforms.collapsed.group.txt", file2 = "cluster_report.csv"
+    output: "final_isoforms.collapsed.read_stat.txt"
+    params: batch = "-l nodes=1:ppn=8", prefix = "final_isoforms.collapsed"
+    shell: "{pythonimport}; python {cupcake}/cupcake/tofu/get_abundance_post_collapse.py {params.prefix} {input.file2}"
+    
+rule filterd:
+    input: "final_isoforms.collapsed.gff"
+    output: "final_isoforms.collapsed.filtered.gff"
+    params: batch = "-l nodes=1:ppn=8", prefix = "final_isoforms.collapsed"
+    shell: "{pythonimport}; python {cupcake}/cupcake/tofu/filter_away_subset.py {params.prefix}"
+
+rule matchannot:
+    input: "polished.hq_corrected_sorted.sam"
+    output: "matchannot_out.txt"
+    params: batch = "-l nodes=1:ppn=8"
+    shell: "{matchannot} {input} --gtf {gtf} > {output}"
