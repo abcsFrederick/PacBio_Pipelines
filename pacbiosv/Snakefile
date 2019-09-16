@@ -1,0 +1,76 @@
+import config
+from snakemake.utils import R
+import glob
+import os
+from os import listdir
+from os.path import isfile, isdir, join
+import os.path as path
+import sys
+
+#path to apps
+ngmlr = "/is2/projects/CCR-SF/active/Software/tools/nextsv/bin/ngml"
+sniffles = "/is2/projects/CCR-SF/active/Software/tools/nextsv/bin/sniffles"
+pbsv = "/is2/projects/pacbio/static/software/smrtlinkv5/install/smrtlink-release_5.0.1.9585/bundles/smrttools/install/smrttools-release_5.0.1.9578/smrtcmds/bin/pbsv"
+
+if config.ref == "hg38":
+    refgenome = "/is2/projects/CCR-SF/active/RefGenomes/hg38_SEQC/BWA/hg38.fasta"
+
+
+analysis = config.analysis
+unaligned = config.unaligned
+
+if unaligned.split(".")[-1] == "bam"
+    rule all:
+        input: Aligned.bam
+	
+    rule pbsvalign:
+        input: unaligned
+		output: Aligned.bam
+        params: batch = "-l nodes=1:ppn=16"
+        shell: "{pbsv} align {refgenome} {input} {output}"        
+    rule pbsvcall:
+        input: Aligned.bam
+		output: output.vcf
+        params: batch = "-l nodes=1:ppn=16"
+        shell: "{pbsv} call {refgenome} {input} {output}"
+
+else:
+
+    rule all:
+        input: output.sam, output.sam.bam, output.sorted.bam, output.vcf
+
+    rule ngmlr:
+        input: samplename
+        output: output.sam
+        params: batch = "-l nodes=1:ppn=16"
+        shell: "export PATH=/is2/projects/CCR-SF/active/Software/tools/nextsv/bin:$PATH; {ngmlr} -t 16 -r {refgenome} -q samplename -o output.sam  2>run_ngmlr.err 1>run_ngmlr.log"
+
+    rule pbsvalign:
+        input: samplename
+        output: 
+        params: batch = "-l nodes=1:ppn=16"	
+        shell: "{pbsv} align "	
+	
+    rule sambview:
+	    input: output.sam
+        output: output.sam.bam	
+        params: batch = "-l nodes=1:ppn=16"		
+        shell: "module load sambamba; sambamba view -S -f bam output.sam >output.sam.bam"	
+
+    rule samsort:
+        input: output.sam.bam	
+        output: output.sorted.bam
+        params: batch = "-l nodes=1:ppn=16 mem=48g"	
+	    shell: "module load sambamba; sambamba sort -m 48GB -t 16 --tmpdir ./ -o output.sorted.bam output.sam.bam"	
+		
+    rule sniff:
+        input: output.sorted.bam
+        output: output.vcf
+        params: batch = "-l nodes=1:ppn=16"
+        shell: "export PATH=/is2/projects/CCR-SF/active/Software/tools/nextsv/bin:$PATH; sniffles -m output.sorted.bam --vcf output.vcf --min_support 4 -l 50 --threads 16 --tmp_file ./ --cluster 2>run.sniffles.err 1>run.sniffles.log"
+		
+rule survivor:
+    input: "output.vcf"
+    output: "Common_pacbio_1000distance-1000minSV.vcf"
+    params: batch = "-l nodes=1:ppn=16"
+    shell:  "cd compare; cp ../list.txt .; /is2/projects/CCR-SF/active/Software/tools/SURVIVOR/Debug/SURVIVOR 5 list.txt 1000 2 0 0 0 1000 Common_pacbio_1000distance-1000minSV.vcf; /is2/projects/CCR-SF/active/Software/tools/SURVIVOR/Debug/SURVIVOR 5 list.txt 100 2 0 0 0 1000 Common_pacbio_100distance_1000minSV.vcf; /is2/projects/CCR-SF/active/Software/tools/SURVIVOR/Debug/SURVIVOR 5 list.txt 50 2 0 0 0 100 Common_pacbio_50distance_100minSV.vcf"
